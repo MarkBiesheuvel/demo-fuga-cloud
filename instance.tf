@@ -9,6 +9,10 @@ data "openstack_networking_network_v2" "network" {
   name = "public"
 }
 
+data "openstack_networking_subnet_v2" "subnet" {
+  network_id = data.openstack_networking_network_v2.network.id
+}
+
 data "openstack_compute_availability_zones_v2" "zones" {}
 
 resource "openstack_compute_keypair_v2" "ssh_key" {
@@ -16,9 +20,9 @@ resource "openstack_compute_keypair_v2" "ssh_key" {
   public_key = file("${path.module}/ssh_key.pub")
 }
 
-resource "openstack_compute_secgroup_v2" "secgroup" {
-  name        = "http"
-  description = "Allow HTTP traffic"
+resource "openstack_compute_secgroup_v2" "server" {
+  name        = "sg-webserver"
+  description = "Allow HTTP traffic from load balancer"
 
   rule {
     from_port   = 22
@@ -26,6 +30,18 @@ resource "openstack_compute_secgroup_v2" "secgroup" {
     ip_protocol = "tcp"
     cidr        = "31.187.139.134/32"
   }
+
+  rule {
+    from_port     = 80
+    to_port       = 80
+    ip_protocol   = "tcp"
+    from_group_id = openstack_compute_secgroup_v2.lb.id
+  }
+}
+
+resource "openstack_compute_secgroup_v2" "lb" {
+  name        = "sg-lb"
+  description = "Allow HTTP traffic from everywhere"
 
   rule {
     from_port   = 80
@@ -42,7 +58,7 @@ resource "openstack_compute_instance_v2" "web_server" {
   name            = "webserver-${each.value}"
   flavor_name     = "t2.micro"
   key_pair        = openstack_compute_keypair_v2.ssh_key.name
-  security_groups = ["${openstack_compute_secgroup_v2.secgroup.name}"]
+  security_groups = ["${openstack_compute_secgroup_v2.server.name}"]
   user_data       = file("${path.module}/userdata.sh")
 
 
@@ -61,8 +77,42 @@ resource "openstack_compute_instance_v2" "web_server" {
   }
 }
 
-output "vpc_ids" {
-  value = {
-    for k, v in openstack_compute_instance_v2.web_server : k => v.access_ip_v4
+resource "openstack_lb_loadbalancer_v2" "lb" {
+  vip_subnet_id      = data.openstack_networking_subnet_v2.subnet.id
+  security_group_ids = ["${openstack_compute_secgroup_v2.lb.id}"]
+}
+
+resource "openstack_lb_listener_v2" "listener" {
+  protocol        = "HTTP"
+  protocol_port   = 80
+  loadbalancer_id = openstack_lb_loadbalancer_v2.lb.id
+}
+
+resource "openstack_lb_pool_v2" "pool" {
+  protocol    = "HTTP"
+  lb_method   = "LEAST_CONNECTIONS"
+  listener_id = openstack_lb_listener_v2.listener.id
+}
+
+resource "openstack_lb_member_v2" "member" {
+  for_each = openstack_compute_instance_v2.web_server
+
+  pool_id       = openstack_lb_pool_v2.pool.id
+  subnet_id     = data.openstack_networking_subnet_v2.subnet.id
+  address       = each.value.access_ip_v4
+  protocol_port = 80
+
+  lifecycle {
+    ignore_changes = [name]
   }
+}
+
+output "webserver_ip_addresses" {
+  value = values({
+    for k, v in openstack_compute_instance_v2.web_server : k => v.access_ip_v4
+  })
+}
+
+output "load_balancer_ip_address" {
+  value = openstack_lb_loadbalancer_v2.lb.vip_address
 }
