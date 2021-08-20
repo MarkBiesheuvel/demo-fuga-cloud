@@ -1,10 +1,22 @@
+# Name used in Fuga.cloud
+data "openstack_images_image_v2" "ubuntu" {
+  name        = "Ubuntu 20.04 LTS"
+  most_recent = true
+}
+
+# Default network in Fuga.cloud
+data "openstack_networking_network_v2" "network" {
+  name = "public"
+}
+
+data "openstack_compute_availability_zones_v2" "zones" {}
 
 resource "openstack_compute_keypair_v2" "ssh_key" {
   name       = "ssh_key"
   public_key = file("${path.module}/ssh_key.pub")
 }
 
-resource "openstack_compute_secgroup_v2" "firewall" {
+resource "openstack_compute_secgroup_v2" "secgroup" {
   name        = "http"
   description = "Allow HTTP traffic"
 
@@ -23,20 +35,19 @@ resource "openstack_compute_secgroup_v2" "firewall" {
   }
 }
 
-data "openstack_images_image_v2" "ubuntu" {
-  name        = "Ubuntu 20.04 LTS"
-  most_recent = true
-}
+resource "openstack_compute_instance_v2" "web_server" {
+  for_each          = toset(data.openstack_compute_availability_zones_v2.zones.names)
+  availability_zone = each.value
 
-resource "openstack_compute_instance_v2" "server" {
-  name            = "webserver-1"
+  name            = "webserver-${each.value}"
   flavor_name     = "t2.micro"
   key_pair        = openstack_compute_keypair_v2.ssh_key.name
-  security_groups = ["${openstack_compute_secgroup_v2.firewall.name}"]
+  security_groups = ["${openstack_compute_secgroup_v2.secgroup.name}"]
   user_data       = file("${path.module}/userdata.sh")
 
+
   block_device {
-    uuid             = "${data.openstack_images_image_v2.ubuntu.id}"
+    uuid             = data.openstack_images_image_v2.ubuntu.id
     source_type      = "image"
     volume_size      = 10 # GB
     boot_index       = 0
@@ -46,10 +57,12 @@ resource "openstack_compute_instance_v2" "server" {
   }
 
   network {
-    name = "public"
+    name = data.openstack_networking_network_v2.network.name
   }
 }
 
-output "instance_ip_addr" {
-  value = openstack_compute_instance_v2.server.access_ip_v4
+output "vpc_ids" {
+  value = {
+    for k, v in openstack_compute_instance_v2.web_server : k => v.access_ip_v4
+  }
 }
